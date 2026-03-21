@@ -1,0 +1,13 @@
+position_limits:
+  max_single_position_pct: 0.10
+  max_sector_pct: 0.30
+  max_positions: 25
+
+drawdown_guards:
+  amber_threshold: 0.08
+  red_threshold: 0.12
+  black_threshold: 0.15
+
+exposure:
+  max_long_pct: 1.0
+  max_per_market_pct: 0.80

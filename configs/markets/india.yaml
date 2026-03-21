@@ -1,0 +1,43 @@
+market: india
+exchanges:
+  - name: NSE
+    suffix: ".NS"
+    currency: INR
+  - name: BSE
+    suffix: ".BO"
+    currency: INR
+
+default_exchange: NSE
+trading_hours:
+  open: "09:15"
+  close: "15:30"
+  timezone: "Asia/Kolkata"
+
+data_providers:
+  primary: nselib
+  fallback:
+    - yfinance
+    - tradingview-screener
+
+costs:
+  brokerage_pct: 0.0003
+  stt_buy_pct: 0.001
+  stt_sell_pct: 0.001
+  exchange_txn_pct: 0.0000345
+  gst_on_brokerage_pct: 0.18
+  stamp_duty_buy_pct: 0.00015
+  sebi_fee_pct: 0.000001
+
+liquidity:
+  min_daily_value_inr: 1000000
+  max_participation_pct: 5
+
+universe:
+  source: nifty500
+  url: "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+
+tax:
+  ltcg_rate: 0.125
+  ltcg_exemption_inr: 125000
+  ltcg_holding_months: 12
+  stcg_rate: 0.20

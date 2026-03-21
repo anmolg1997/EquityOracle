@@ -1,0 +1,71 @@
+[project]
+name = "equityoracle"
+version = "0.1.0"
+description = "Global equity recommender with multi-horizon predictions, paper trading simulation, configurable autonomy, and self-improvement"
+authors = [{ name = "Anmol Jaiswal", email = "anmolg1997@users.noreply.github.com" }]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.6.0",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30.0",
+    "alembic>=1.14.0",
+    "redis>=5.2.0",
+    "structlog>=24.4.0",
+    "apscheduler>=3.10.0",
+    "httpx>=0.28.0",
+    "tenacity>=9.0.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0.0",
+    "pandas>=2.2.0",
+    "numpy>=2.1.0",
+    "pandas-ta>=0.3.14b1",
+    "scikit-learn>=1.6.0",
+    "xgboost>=2.1.0",
+    "torch>=2.5.0",
+    "vectorbt>=0.26.0",
+    "yfinance>=0.2.48",
+    "nselib>=2.4",
+    "tradingview-screener>=3.1.0",
+    "newsapi-python>=0.2.7",
+    "transformers>=4.47.0",
+    "litellm>=1.55.0",
+    "opentelemetry-api>=1.29.0",
+    "opentelemetry-sdk>=1.29.0",
+    "opentelemetry-instrumentation-fastapi>=0.50b0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "hypothesis>=6.0.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+    "testcontainers[postgres,redis]>=4.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "SIM", "TCH"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

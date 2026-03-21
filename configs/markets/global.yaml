@@ -1,0 +1,14 @@
+market: global
+default_exchange: ""
+
+data_providers:
+  primary: tradingview-screener
+  fallback:
+    - yfinance
+
+costs:
+  brokerage_pct: 0.001
+
+liquidity:
+  min_daily_value_usd: 50000
+  max_participation_pct: 5

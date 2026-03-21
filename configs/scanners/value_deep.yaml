@@ -1,0 +1,21 @@
+name: "Deep Value"
+description: "Undervalued quality stocks with margin of safety"
+filters:
+  - field: pe_ratio
+    operator: "<"
+    value: 15
+  - field: pb_ratio
+    operator: "<"
+    value: 2
+  - field: roe
+    operator: ">="
+    value: 12
+  - field: debt_to_equity
+    operator: "<"
+    value: 1
+  - field: profit_growth_3yr
+    operator: ">="
+    value: 10
+  - field: dividend_yield
+    operator: ">="
+    value: 1

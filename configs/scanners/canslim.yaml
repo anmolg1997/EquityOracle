@@ -1,0 +1,22 @@
+name: "CANSLIM"
+description: "William O'Neil's CANSLIM growth screening criteria"
+filters:
+  - field: eps_growth_quarterly
+    operator: ">="
+    value: 25
+  - field: eps_growth_annual
+    operator: ">="
+    value: 25
+  - field: revenue_growth
+    operator: ">="
+    value: 20
+  - field: rs_rating
+    operator: ">="
+    value: 80
+  - field: volume_ratio
+    operator: ">="
+    value: 1.5
+  - field: close
+    operator: near
+    reference: high_52w
+    value: 15

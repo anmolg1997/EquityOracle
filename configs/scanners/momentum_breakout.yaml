@@ -1,0 +1,17 @@
+name: "Momentum Breakout"
+description: "Stocks breaking out of consolidation with volume"
+filters:
+  - field: close
+    operator: ">"
+    reference: high_20d
+  - field: volume
+    operator: ">"
+    reference: avg_volume_20d
+    multiplier: 2.0
+  - field: rsi_14
+    operator: between
+    min: 50
+    max: 75
+  - field: adx_14
+    operator: ">="
+    value: 25

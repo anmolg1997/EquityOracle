@@ -1,0 +1,21 @@
+default_level: manual
+
+engines:
+  scanner:
+    level: full_auto
+    description: "Scanning is always automated"
+  recommender:
+    level: semi_auto
+    description: "Recommendations generated, human approves trades"
+  paper_trader:
+    level: manual
+    description: "Manual paper trading by default"
+  self_improvement:
+    level: semi_auto
+    description: "Proposes weight changes, human confirms"
+
+self_improvement:
+  min_sample_size: 100
+  max_weight_change_pct: 5
+  ab_test_duration_days: 14
+  significance_threshold: 0.10

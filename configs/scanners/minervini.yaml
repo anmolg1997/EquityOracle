@@ -1,0 +1,26 @@
+name: "Minervini Stage 2"
+description: "Mark Minervini's trend template - stocks in Stage 2 uptrend"
+filters:
+  - field: close
+    operator: ">"
+    reference: sma_150
+  - field: close
+    operator: ">"
+    reference: sma_200
+  - field: sma_150
+    operator: ">"
+    reference: sma_200
+  - field: sma_200
+    operator: trending_up
+    periods: 20
+  - field: close
+    operator: within_pct
+    reference: high_52w
+    value: 25
+  - field: close
+    operator: above_pct
+    reference: low_52w
+    value: 30
+  - field: rs_rating
+    operator: ">="
+    value: 70

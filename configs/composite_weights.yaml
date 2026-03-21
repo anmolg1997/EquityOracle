@@ -1,0 +1,5 @@
+weights:
+  technical: 0.25
+  fundamental: 0.25
+  sentiment: 0.20
+  ml_prediction: 0.30

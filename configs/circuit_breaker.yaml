@@ -1,0 +1,14 @@
+circuit_breaker:
+  amber:
+    accuracy_threshold: 0.40
+    rolling_window_days: 5
+    action: "reduce_position_size_50_pct"
+  red:
+    accuracy_threshold: 0.35
+    rolling_window_days: 10
+    drawdown_threshold: 0.08
+    action: "pause_new_entries"
+  black:
+    drawdown_threshold: 0.15
+    action: "flatten_to_cash"
+    requires_manual_restart: true

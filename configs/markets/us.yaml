@@ -1,0 +1,32 @@
+market: us
+exchanges:
+  - name: NYSE
+    suffix: ""
+    currency: USD
+  - name: NASDAQ
+    suffix: ""
+    currency: USD
+
+default_exchange: NYSE
+trading_hours:
+  open: "09:30"
+  close: "16:00"
+  timezone: "America/New_York"
+
+data_providers:
+  primary: yfinance
+  fallback:
+    - alpha_vantage
+
+costs:
+  brokerage_flat: 0
+  sec_fee_per_million: 27.80
+
+liquidity:
+  min_daily_value_usd: 100000
+  max_participation_pct: 5
+
+tax:
+  ltcg_rate: 0.15
+  ltcg_holding_months: 12
+  stcg_rate: 0.37

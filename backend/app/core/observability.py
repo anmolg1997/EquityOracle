@@ -8,22 +8,17 @@ from typing import Any, Generator
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory import InMemorySpanExporter
 
 from app.core.types import CorrelationId, new_correlation_id
 
 _tracer: trace.Tracer | None = None
 _metrics: dict[str, list[float]] = {}
-_span_exporter: InMemorySpanExporter | None = None
 
 
 def setup_tracing(service_name: str = "equityoracle") -> None:
-    global _tracer, _span_exporter
+    global _tracer
     resource = Resource.create({"service.name": service_name})
     provider = TracerProvider(resource=resource)
-    _span_exporter = InMemorySpanExporter()
-    provider.add_span_processor(SimpleSpanProcessor(_span_exporter))
     trace.set_tracer_provider(provider)
     _tracer = trace.get_tracer(service_name)
 

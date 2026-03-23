@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.dependencies import get_data_provider, get_market_data_repository
 from app.application.recommender.service import RecommenderService
@@ -10,6 +10,8 @@ from app.core.types import Market, TimeHorizon
 from app.domain.market_data.ports import MarketDataProvider, MarketDataRepository
 
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
+
+_VALID_HORIZONS = [h.value for h in TimeHorizon]
 
 
 @router.get("")
@@ -24,7 +26,13 @@ async def get_recommendations(
 
     horizons = None
     if horizon:
-        horizons = [TimeHorizon(horizon)]
+        try:
+            horizons = [TimeHorizon(horizon)]
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid horizon '{horizon}'. Must be one of: {_VALID_HORIZONS}",
+            )
 
     recs = await service.generate_recommendations(
         market=Market(market),

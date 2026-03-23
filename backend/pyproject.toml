@@ -3,7 +3,6 @@ name = "equityoracle"
 version = "0.1.0"
 description = "Global equity recommender with multi-horizon predictions, paper trading simulation, configurable autonomy, and self-improvement"
 authors = [{ name = "Anmol Jaiswal", email = "anmolg1997@users.noreply.github.com" }]
-readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.12"
 
@@ -54,6 +53,9 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
 
 [tool.ruff]
 target-version = "py312"

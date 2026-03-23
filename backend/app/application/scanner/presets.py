@@ -9,7 +9,7 @@ import yaml
 
 from app.application.scanner.filter_spec import FilterSpec
 
-_PRESETS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "configs" / "scanners"
+_PRESETS_DIR = Path(__file__).resolve().parents[4] / "configs" / "scanners"
 
 
 def load_preset(name: str) -> FilterSpec:

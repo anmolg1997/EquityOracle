@@ -10,11 +10,11 @@ from app.application.scanner.filter_spec import FilterSpec
 from app.application.scanner.presets import list_presets, load_preset
 from app.core.logging import get_logger
 from app.core.observability import trace_span
-from app.core.types import Market, Ticker, new_correlation_id
+from app.core.types import Exchange, Market, Ticker, new_correlation_id
 from app.domain.analysis.composite import compute_composite
 from app.domain.analysis.decorrelation import compute_decorrelation
 from app.domain.analysis.factors import compute_factor_scores
-from app.domain.analysis.models import CompositeScore, ScanResult, TechnicalScore
+from app.domain.analysis.models import CompositeScore, FactorScore, ScanResult, TechnicalScore
 from app.domain.analysis.technical import compute_technical_score
 from app.domain.market_data.liquidity import passes_liquidity_filter
 from app.domain.market_data.ports import MarketDataProvider, MarketDataRepository
@@ -47,13 +47,14 @@ class ScannerService:
     ) -> list[ScanResult]:
         """Run a full scan on the market universe."""
         correlation_id = new_correlation_id()
+        cache_key = f"{market.value}:{preset_name or '__all__'}:{limit}"
 
         with trace_span("scanner.run_scan", correlation_id=correlation_id):
             # Try serving from cache first
-            if self._cache and preset_name:
-                cached = await self._cache.get_json("scan", f"{market.value}:{preset_name}")
+            if self._cache:
+                cached = await self._cache.get_json("scan", cache_key)
                 if cached:
-                    log.info("scan_served_from_cache", preset=preset_name)
+                    log.info("scan_served_from_cache", market=market.value, preset=preset_name, limit=limit)
                     return self._deserialize_results(cached)
 
             tickers = await self._repo.get_universe(market)
@@ -78,6 +79,11 @@ class ScannerService:
                     ohlcv = await self._repo.get_ohlcv(ticker, start, end)
                     if not ohlcv or len(ohlcv) < 50:
                         ohlcv = await self._provider.get_ohlcv(ticker, start, end)
+                        if ohlcv:
+                            try:
+                                await self._repo.save_ohlcv_batch(ohlcv)
+                            except Exception as save_err:
+                                log.debug("scan_ohlcv_persist_error", ticker=str(ticker), error=str(save_err))
 
                     if not ohlcv or len(ohlcv) < 20:
                         continue
@@ -86,6 +92,11 @@ class ScannerService:
                     fundamentals = await self._repo.get_fundamentals(ticker)
                     if not fundamentals:
                         fundamentals = await self._provider.get_fundamentals(ticker)
+                        if fundamentals:
+                            try:
+                                await self._repo.save_fundamentals(fundamentals)
+                            except Exception as save_err:
+                                log.debug("scan_fundamentals_persist_error", ticker=str(ticker), error=str(save_err))
 
                     factor_score = compute_factor_scores(ticker, ohlcv, fundamentals)
 
@@ -144,10 +155,10 @@ class ScannerService:
 
             results = results[:limit]
 
-            if self._cache and preset_name:
+            if self._cache:
                 await self._cache.set_json(
                     "scan",
-                    f"{market.value}:{preset_name}",
+                    cache_key,
                     self._serialize_results(results),
                     ttl_seconds=86400,
                 )
@@ -177,16 +188,141 @@ class ScannerService:
         return [
             {
                 "ticker": str(r.ticker),
+                "symbol": r.ticker.symbol,
+                "exchange": r.ticker.exchange.value,
+                "market": r.ticker.market.value,
                 "rank": r.rank,
-                "overall_score": str(r.composite_score.overall),
-                "technical": str(r.composite_score.technical),
-                "fundamental": str(r.composite_score.fundamental),
-                "effective_signals": str(r.composite_score.effective_signal_count),
+                "overall_score": float(r.composite_score.overall),
+                "technical": float(r.composite_score.technical),
+                "fundamental": float(r.composite_score.fundamental),
+                "effective_signals": float(r.composite_score.effective_signal_count),
+                "confidence": r.composite_score.confidence_level,
+                "technical_indicators": {
+                    "score": float(r.technical_score.score),
+                    "rsi_14": self._dec_to_float(r.technical_score.rsi_14),
+                    "macd_histogram": self._dec_to_float(r.technical_score.macd_histogram),
+                    "adx_14": self._dec_to_float(r.technical_score.adx_14),
+                    "volume_ratio": self._dec_to_float(r.technical_score.volume_ratio),
+                    "rs_rating": self._dec_to_float(r.technical_score.rs_rating),
+                    "obv_trend": r.technical_score.obv_trend,
+                },
+                "factor_components": {
+                    "composite": float(r.factor_score.composite),
+                    "momentum_score": float(r.factor_score.momentum_score),
+                    "quality_score": float(r.factor_score.quality_score),
+                    "value_score": float(r.factor_score.value_score),
+                    "momentum_details": r.factor_score.momentum_details,
+                    "quality_details": r.factor_score.quality_details,
+                    "value_details": r.factor_score.value_details,
+                },
                 "passed_presets": r.passed_presets,
             }
             for r in results
         ]
 
     def _deserialize_results(self, data: list[dict]) -> list[ScanResult]:
-        # Lightweight deserialization for cached results
-        return []
+        results: list[ScanResult] = []
+        today = date.today()
+
+        for row in data:
+            ticker = self._ticker_from_cache_row(row)
+            if ticker is None:
+                continue
+
+            technical = Decimal(str(row.get("technical", 0)))
+            fundamental = Decimal(str(row.get("fundamental", 0)))
+            overall = Decimal(str(row.get("overall_score", 0)))
+            effective_signals = Decimal(str(row.get("effective_signals", 0)))
+            tech_details = row.get("technical_indicators") or {}
+            factor_details = row.get("factor_components") or {}
+
+            composite = CompositeScore(
+                ticker=ticker,
+                as_of_date=today,
+                technical=technical,
+                fundamental=fundamental,
+                overall=overall,
+                effective_signal_count=effective_signals,
+            )
+
+            tech_score = TechnicalScore(
+                ticker=ticker,
+                as_of_date=today,
+                score=technical,
+                rsi_14=self._float_to_dec(tech_details.get("rsi_14")),
+                macd_histogram=self._float_to_dec(tech_details.get("macd_histogram")),
+                adx_14=self._float_to_dec(tech_details.get("adx_14")),
+                volume_ratio=self._float_to_dec(tech_details.get("volume_ratio")),
+                rs_rating=self._float_to_dec(tech_details.get("rs_rating")),
+                obv_trend=str(tech_details.get("obv_trend", "")),
+            )
+            factor_score = FactorScore(
+                ticker=ticker,
+                as_of_date=today,
+                composite=self._float_to_dec(factor_details.get("composite")) or fundamental,
+                momentum_score=self._float_to_dec(factor_details.get("momentum_score")) or Decimal(0),
+                quality_score=self._float_to_dec(factor_details.get("quality_score")) or fundamental,
+                value_score=self._float_to_dec(factor_details.get("value_score")) or Decimal(0),
+                momentum_details=factor_details.get("momentum_details") or {},
+                quality_details=factor_details.get("quality_details") or {},
+                value_details=factor_details.get("value_details") or {},
+            )
+
+            results.append(
+                ScanResult(
+                    ticker=ticker,
+                    composite_score=composite,
+                    technical_score=tech_score,
+                    factor_score=factor_score,
+                    passed_presets=row.get("passed_presets", []),
+                    rank=int(row.get("rank", 0)),
+                )
+            )
+
+        results.sort(key=lambda r: r.rank if r.rank > 0 else 10_000)
+        return results
+
+    def _ticker_from_cache_row(self, row: dict[str, Any]) -> Ticker | None:
+        symbol = row.get("symbol")
+        exchange = row.get("exchange")
+        market = row.get("market")
+
+        if symbol and exchange and market:
+            try:
+                return Ticker(
+                    symbol=str(symbol),
+                    exchange=Exchange(str(exchange)),
+                    market=Market(str(market)),
+                )
+            except Exception:
+                pass
+
+        ticker_raw = str(row.get("ticker", ""))
+        if ":" not in ticker_raw:
+            return None
+
+        sym, ex = ticker_raw.split(":", 1)
+        try:
+            return Ticker(
+                symbol=sym,
+                exchange=Exchange(ex),
+                market=Market(str(market)) if market else Market.INDIA,
+            )
+        except Exception:
+            return None
+
+    def _dec_to_float(self, value: Decimal | None) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    def _float_to_dec(self, value: Any) -> Decimal | None:
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return None

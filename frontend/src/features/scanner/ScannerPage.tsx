@@ -1,6 +1,39 @@
-import { useState, useCallback, Component, type ReactNode } from 'react';
+import { Component, type ReactNode, useCallback, useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { fetcher } from '@/shared/api/client';
+
+interface ScanDiagnostics {
+  composite: {
+    overall: number;
+    technical: number;
+    fundamental: number;
+    effective_signals: number;
+    confidence: string;
+  };
+  technical: {
+    score: number;
+    rsi_14: number | null;
+    macd_histogram: number | null;
+    adx_14: number | null;
+    volume_ratio: number | null;
+    rs_rating: number | null;
+    obv_trend: string;
+  };
+  factor: {
+    composite: number;
+    momentum_score: number;
+    quality_score: number;
+    value_score: number;
+    momentum_details?: Record<string, number | string | null>;
+    quality_details?: Record<string, number | string | null>;
+    value_details?: Record<string, number | string | null>;
+  };
+  preset: {
+    selected: string | null;
+    passed: boolean;
+    matched_presets: string[];
+  };
+}
 
 interface ScanResult {
   rank: number;
@@ -11,6 +44,7 @@ interface ScanResult {
   effective_signals: number;
   confidence: string;
   passed_presets: string[];
+  diagnostics?: ScanDiagnostics;
 }
 
 interface ScanResponse {
@@ -21,6 +55,19 @@ interface ScanResponse {
 }
 
 const SCAN_TIMEOUT = 10 * 60 * 1000;
+const SCAN_STORAGE_KEY = 'equityoracle:last-scan-results';
+
+function loadSavedScan(): ScanResponse | null {
+  try {
+    const raw = localStorage.getItem(SCAN_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as ScanResponse;
+    if (!parsed || !Array.isArray(parsed.results)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
 
 class ScannerErrorBoundary extends Component<
   { children: ReactNode; onReset: () => void },
@@ -63,6 +110,12 @@ function safeFixed(val: unknown, digits = 1): string {
   return val.toFixed(digits);
 }
 
+function confidenceClass(level: string): string {
+  if (level === 'high') return 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30';
+  if (level === 'medium') return 'bg-amber-500/20 text-amber-300 border-amber-500/30';
+  return 'bg-gray-700/60 text-gray-300 border-gray-600/50';
+}
+
 function scoreColor(score: number): string {
   if (score >= 70) return 'text-emerald-400';
   if (score >= 50) return 'text-brand-300';
@@ -86,6 +139,43 @@ function ScorePill({ score }: { score: number | null | undefined }) {
         />
       </div>
       <span className={`font-mono text-xs ${scoreColor(score)}`}>{score.toFixed(1)}</span>
+    </div>
+  );
+}
+
+function SignalBar({ label, value }: { label: string; value: number | null | undefined }) {
+  if (value == null || Number.isNaN(value)) {
+    return (
+      <div className="space-y-1">
+        <p className="text-[10px] uppercase tracking-wide text-gray-500">{label}</p>
+        <p className="text-xs text-gray-600">N/A</p>
+      </div>
+    );
+  }
+  const pct = Math.min(Math.max(value, 0), 100);
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between">
+        <p className="text-[10px] uppercase tracking-wide text-gray-500">{label}</p>
+        <p className="text-xs font-mono text-gray-300">{value.toFixed(1)}</p>
+      </div>
+      <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+        <div
+          className={`h-full rounded-full ${
+            pct >= 70 ? 'bg-emerald-500' : pct >= 50 ? 'bg-brand-500' : pct >= 30 ? 'bg-amber-500' : 'bg-red-500'
+          }`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function MetricTile({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-gray-800 bg-gray-950/40 px-3 py-2">
+      <p className="text-[10px] uppercase tracking-wide text-gray-500">{label}</p>
+      <p className="mt-1 text-sm font-mono text-gray-200">{value}</p>
     </div>
   );
 }
@@ -123,11 +213,7 @@ function ScanResultsTable({ data, isFetching }: { data?: ScanResponse; isFetchin
           <td className="p-3 text-right font-mono text-xs text-gray-300">{safeFixed(r.fundamental_score)}</td>
           <td className="p-3 text-right font-mono text-xs text-gray-400">{safeFixed(r.effective_signals, 0)}</td>
           <td className="p-3 text-center">
-            <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-              r.confidence === 'high' ? 'bg-emerald-500/20 text-emerald-400' :
-              r.confidence === 'medium' ? 'bg-amber-500/20 text-amber-400' :
-              'bg-gray-700/60 text-gray-400'
-            }`}>
+            <span className={`inline-flex px-2 py-0.5 rounded border text-[10px] font-bold uppercase ${confidenceClass(r.confidence)}`}>
               {r.confidence || '—'}
             </span>
           </td>
@@ -139,7 +225,10 @@ function ScanResultsTable({ data, isFetching }: { data?: ScanResponse; isFetchin
 
 export default function ScannerPage() {
   const [preset, setPreset] = useState<string>('');
-  const [shouldScan, setShouldScan] = useState(false);
+  const [savedData, setSavedData] = useState<ScanResponse | null>(() => loadSavedScan());
+  const [shouldScan, setShouldScan] = useState(Boolean(savedData));
+  const [immersiveMode, setImmersiveMode] = useState(false);
+  const [selectedTicker, setSelectedTicker] = useState<string | null>(savedData?.results?.[0]?.ticker ?? null);
   const queryClient = useQueryClient();
 
   const { data: presets } = useQuery({
@@ -147,7 +236,7 @@ export default function ScannerPage() {
     queryFn: () => fetcher<{ presets: Array<{ id: string; name: string; description: string }> }>('/scanner/presets'),
   });
 
-  const scanQuery = useQuery({
+  const scanQuery = useQuery<ScanResponse>({
     queryKey: ['scan-results', preset],
     queryFn: () =>
       fetcher<ScanResponse>(
@@ -161,6 +250,31 @@ export default function ScannerPage() {
   });
 
   const { data, isFetching, isError, error, dataUpdatedAt } = scanQuery;
+  const effectiveData = data ?? savedData;
+  const selectedResult = effectiveData?.results.find((r) => r.ticker === selectedTicker) ?? null;
+
+  useEffect(() => {
+    if (!data) return;
+    setSavedData(data);
+    try {
+      localStorage.setItem(SCAN_STORAGE_KEY, JSON.stringify(data));
+    } catch {
+      // Ignore storage failures.
+    }
+  }, [data]);
+
+  useEffect(() => {
+    if (!effectiveData?.results?.length) {
+      setSelectedTicker(null);
+      return;
+    }
+    if (!selectedTicker || !effectiveData.results.some((r) => r.ticker === selectedTicker)) {
+      const first = effectiveData.results[0];
+      if (first) {
+        setSelectedTicker(first.ticker);
+      }
+    }
+  }, [effectiveData, selectedTicker]);
 
   const handleScan = useCallback(() => {
     if (shouldScan) {
@@ -171,23 +285,28 @@ export default function ScannerPage() {
 
   const handleReset = useCallback(() => {
     setShouldScan(false);
+    setSavedData(null);
+    setSelectedTicker(null);
+    try {
+      localStorage.removeItem(SCAN_STORAGE_KEY);
+    } catch {
+      // Ignore storage cleanup failures.
+    }
     queryClient.removeQueries({ queryKey: ['scan-results'] });
   }, [queryClient]);
 
-  const lastUpdated = dataUpdatedAt
-    ? new Date(dataUpdatedAt).toLocaleTimeString()
-    : null;
+  const lastUpdated = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString() : null;
 
   return (
     <div className="space-y-6 max-w-7xl">
       <div>
         <h2 className="text-2xl font-bold text-gray-100">Scanner</h2>
         <p className="text-sm text-gray-500 mt-1">
-          Scan the market with pre-built or custom filters
+          Scan the market with pre-built filters, then inspect full signal derivation per stock.
         </p>
       </div>
 
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <select
           value={preset}
           onChange={(e) => setPreset(e.target.value)}
@@ -211,6 +330,16 @@ export default function ScannerPage() {
           )}
           {isFetching ? 'Scanning…' : 'Run Scan'}
         </button>
+        <button
+          onClick={() => setImmersiveMode((v: boolean) => !v)}
+          className={`px-3 py-2 rounded-lg border text-xs font-medium transition-colors ${
+            immersiveMode
+              ? 'border-brand-500/60 bg-brand-600/20 text-brand-200'
+              : 'border-gray-700 bg-gray-900 text-gray-300 hover:border-gray-600'
+          }`}
+        >
+          {immersiveMode ? 'Immersive: ON' : 'Immersive: OFF'}
+        </button>
         {lastUpdated && !isFetching && (
           <span className="text-xs text-gray-600">Last updated {lastUpdated}</span>
         )}
@@ -226,7 +355,7 @@ export default function ScannerPage() {
             <p className="text-sm text-brand-300 font-medium">Scanning market…</p>
             <p className="text-xs text-gray-500 mt-0.5">
               First scan may take several minutes while market data is downloaded.
-              Subsequent scans are much faster.
+              Later scans are served from persisted data + cache.
             </p>
           </div>
         </div>
@@ -237,7 +366,7 @@ export default function ScannerPage() {
           <p className="text-sm text-red-400 font-medium">Scan failed</p>
           <p className="text-xs text-red-500/80 mt-1">
             {(error as Error)?.message?.includes('timeout')
-              ? 'Request timed out. The backend may still be processing — try again in a minute.'
+              ? 'Request timed out. Backend may still be processing; try again in a minute.'
               : (error as Error)?.message || 'An unexpected error occurred'}
           </p>
           <button
@@ -246,11 +375,14 @@ export default function ScannerPage() {
           >
             Retry scan
           </button>
+          {savedData && (
+            <p className="text-xs text-gray-500 mt-2">Showing last successful scan while retrying.</p>
+          )}
         </div>
       )}
 
       <ScannerErrorBoundary onReset={handleReset}>
-        {(data || (isFetching && shouldScan)) && (
+        {(effectiveData || (isFetching && shouldScan)) && !immersiveMode && (
           <div className="bg-gray-900/60 border border-gray-800 rounded-xl overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -266,16 +398,117 @@ export default function ScannerPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  <ScanResultsTable data={data} isFetching={isFetching} />
+                  <ScanResultsTable data={effectiveData ?? undefined} isFetching={isFetching} />
                 </tbody>
               </table>
             </div>
-            {data && (
+            {effectiveData && (
               <div className="p-3 border-t border-gray-800 text-xs text-gray-500">
-                {data.count} results · {data.market} market
-                {data.preset && ` · preset: ${data.preset}`}
+                {effectiveData.count} results · {effectiveData.market} market
+                {effectiveData.preset && ` · preset: ${effectiveData.preset}`}
               </div>
             )}
+          </div>
+        )}
+
+        {(effectiveData || (isFetching && shouldScan)) && immersiveMode && (
+          <div className="grid grid-cols-1 xl:grid-cols-[1.2fr_0.8fr] gap-4">
+            <div className="bg-gray-900/60 border border-gray-800 rounded-xl overflow-hidden">
+              <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-gray-200">Immersive Signal Feed</h3>
+                <p className="text-[11px] text-gray-500">{effectiveData?.count ?? 0} stocks</p>
+              </div>
+              <div className="max-h-[70vh] overflow-y-auto p-3 space-y-2">
+                {effectiveData?.results.map((r) => {
+                  const active = r.ticker === selectedTicker;
+                  return (
+                    <button
+                      key={r.ticker}
+                      onClick={() => setSelectedTicker(r.ticker)}
+                      className={`w-full text-left rounded-lg border px-3 py-3 transition-colors ${
+                        active
+                          ? 'border-brand-500/70 bg-brand-900/20'
+                          : 'border-gray-800 bg-gray-950/30 hover:border-gray-700'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-semibold text-gray-100">{r.ticker}</p>
+                          <p className="text-[11px] text-gray-500">Rank #{r.rank} · Signals {safeFixed(r.effective_signals, 0)}</p>
+                        </div>
+                        <span className={`px-2 py-1 rounded border text-[10px] font-bold uppercase ${confidenceClass(r.confidence)}`}>
+                          {r.confidence}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2 mt-3">
+                        <SignalBar label="Overall" value={r.overall_score} />
+                        <SignalBar label="Technical" value={r.technical_score} />
+                        <SignalBar label="Fundamental" value={r.fundamental_score} />
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="bg-gray-900/60 border border-gray-800 rounded-xl p-4 h-fit xl:sticky xl:top-4">
+              <h3 className="text-sm font-semibold text-gray-200">Signal Architecture</h3>
+              {!selectedResult ? (
+                <p className="text-sm text-gray-500 mt-3">Select a stock for deep diagnostics.</p>
+              ) : (
+                <div className="mt-3 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-lg font-bold text-gray-100">{selectedResult.ticker}</p>
+                      <p className="text-xs text-gray-500">Rank #{selectedResult.rank}</p>
+                    </div>
+                    <span className={`px-2 py-1 rounded border text-[10px] font-bold uppercase ${confidenceClass(selectedResult.confidence)}`}>
+                      {selectedResult.confidence}
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <MetricTile label="Overall" value={safeFixed(selectedResult.overall_score)} />
+                    <MetricTile label="Effective Signals" value={safeFixed(selectedResult.effective_signals, 0)} />
+                    <MetricTile label="Technical Pillar" value={safeFixed(selectedResult.technical_score)} />
+                    <MetricTile label="Fundamental Pillar" value={safeFixed(selectedResult.fundamental_score)} />
+                  </div>
+
+                  <div className="rounded-lg border border-gray-800 bg-gray-950/30 p-3 space-y-3">
+                    <p className="text-xs font-semibold text-gray-300 uppercase tracking-wide">Technical Derivation</p>
+                    <div className="grid grid-cols-2 gap-2">
+                      <MetricTile label="RSI 14" value={safeFixed(selectedResult.diagnostics?.technical?.rsi_14)} />
+                      <MetricTile label="ADX 14" value={safeFixed(selectedResult.diagnostics?.technical?.adx_14)} />
+                      <MetricTile label="MACD Hist" value={safeFixed(selectedResult.diagnostics?.technical?.macd_histogram)} />
+                      <MetricTile label="RS Rating" value={safeFixed(selectedResult.diagnostics?.technical?.rs_rating)} />
+                      <MetricTile label="Volume Ratio" value={safeFixed(selectedResult.diagnostics?.technical?.volume_ratio)} />
+                      <MetricTile label="OBV Trend" value={selectedResult.diagnostics?.technical?.obv_trend || 'N/A'} />
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-gray-800 bg-gray-950/30 p-3 space-y-3">
+                    <p className="text-xs font-semibold text-gray-300 uppercase tracking-wide">Factor Derivation</p>
+                    <div className="grid grid-cols-3 gap-2">
+                      <SignalBar label="Momentum" value={selectedResult.diagnostics?.factor?.momentum_score} />
+                      <SignalBar label="Quality" value={selectedResult.diagnostics?.factor?.quality_score} />
+                      <SignalBar label="Value" value={selectedResult.diagnostics?.factor?.value_score} />
+                    </div>
+                    <p className="text-xs text-gray-500">
+                      Factor composite: {safeFixed(selectedResult.diagnostics?.factor?.composite)}
+                    </p>
+                  </div>
+
+                  {selectedResult.diagnostics?.preset?.selected && (
+                    <div className="rounded-lg border border-gray-800 bg-gray-950/30 p-3">
+                      <p className="text-xs font-semibold text-gray-300 uppercase tracking-wide">Preset Evaluation</p>
+                      <p className={`mt-2 text-xs ${selectedResult.diagnostics.preset.passed ? 'text-emerald-400' : 'text-amber-400'}`}>
+                        {selectedResult.diagnostics.preset.selected}: {selectedResult.diagnostics.preset.passed ? 'Passed' : 'Not matched'}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         )}
       </ScannerErrorBoundary>

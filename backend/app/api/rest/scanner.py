@@ -13,6 +13,15 @@ from app.core.types import Market
 router = APIRouter(prefix="/scanner", tags=["scanner"])
 
 
+def _as_float(value: object) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)  # type: ignore[arg-type]
+    except Exception:
+        return None
+
+
 @router.get("/scan")
 async def run_scan(
     market: str = Query(default="india"),
@@ -46,6 +55,38 @@ async def run_scan(
                 "effective_signals": float(r.composite_score.effective_signal_count),
                 "confidence": r.composite_score.confidence_level,
                 "passed_presets": r.passed_presets,
+                "diagnostics": {
+                    "composite": {
+                        "overall": float(r.composite_score.overall),
+                        "technical": float(r.composite_score.technical),
+                        "fundamental": float(r.composite_score.fundamental),
+                        "effective_signals": float(r.composite_score.effective_signal_count),
+                        "confidence": r.composite_score.confidence_level,
+                    },
+                    "technical": {
+                        "score": float(r.technical_score.score),
+                        "rsi_14": _as_float(r.technical_score.rsi_14),
+                        "macd_histogram": _as_float(r.technical_score.macd_histogram),
+                        "adx_14": _as_float(r.technical_score.adx_14),
+                        "volume_ratio": _as_float(r.technical_score.volume_ratio),
+                        "rs_rating": _as_float(r.technical_score.rs_rating),
+                        "obv_trend": r.technical_score.obv_trend,
+                    },
+                    "factor": {
+                        "composite": float(r.factor_score.composite),
+                        "momentum_score": float(r.factor_score.momentum_score),
+                        "quality_score": float(r.factor_score.quality_score),
+                        "value_score": float(r.factor_score.value_score),
+                        "momentum_details": r.factor_score.momentum_details,
+                        "quality_details": r.factor_score.quality_details,
+                        "value_details": r.factor_score.value_details,
+                    },
+                    "preset": {
+                        "selected": preset,
+                        "passed": bool(preset and (preset in r.passed_presets)),
+                        "matched_presets": r.passed_presets,
+                    },
+                },
             }
             for r in results
         ],

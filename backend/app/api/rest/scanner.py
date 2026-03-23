@@ -41,10 +41,15 @@ async def run_scan(
         preset_name=preset,
         limit=limit,
     )
+    result_source = getattr(results[0], "scan_source", "fresh") if results else "fresh"
     return {
         "count": len(results),
         "market": market,
         "preset": preset,
+        "meta": {
+            "source": result_source,
+            "cache_schema": "v5",
+        },
         "results": [
             {
                 "rank": r.rank,
@@ -55,6 +60,10 @@ async def run_scan(
                 "effective_signals": float(r.composite_score.effective_signal_count),
                 "confidence": r.composite_score.confidence_level,
                 "passed_presets": r.passed_presets,
+                "pipeline_steps": getattr(r, "pipeline_steps", {}),
+                "sparkline": getattr(r, "sparkline", []),
+                "forecast": getattr(r, "forecast", {}),
+                "contribution_breakdown": getattr(r, "contribution_breakdown", {}),
                 "diagnostics": {
                     "composite": {
                         "overall": float(r.composite_score.overall),
@@ -86,6 +95,9 @@ async def run_scan(
                         "passed": bool(preset and (preset in r.passed_presets)),
                         "matched_presets": r.passed_presets,
                     },
+                    "forecast": getattr(r, "forecast", {}),
+                    "timeline": getattr(r, "pipeline_steps", {}),
+                    "contribution": getattr(r, "contribution_breakdown", {}),
                 },
             }
             for r in results

@@ -20,8 +20,10 @@ export function App() {
       <BrowserRouter>
         <div className="flex h-screen overflow-hidden bg-gray-950">
           <Sidebar />
-          <main className="flex-1 overflow-y-auto p-6">
-            <AppRouter />
+          <main className="flex-1 min-w-0 min-h-0 overflow-hidden">
+            <div className="h-full overflow-y-auto p-6">
+              <AppRouter />
+            </div>
           </main>
         </div>
       </BrowserRouter>

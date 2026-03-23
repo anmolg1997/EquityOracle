@@ -81,6 +81,7 @@ class Settings(BaseSettings):
     environment: str = "development"
     log_level: str = "INFO"
     default_market: str = "india"
+    scanner_adaptive_weighting: bool = False
 
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)

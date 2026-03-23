@@ -33,6 +33,71 @@ interface ScanDiagnostics {
     passed: boolean;
     matched_presets: string[];
   };
+  forecast?: ForecastPayload;
+  timeline?: Record<string, string | boolean | null>;
+}
+
+interface PipelineSteps {
+  universe_selected?: boolean;
+  ohlcv_source?: string;
+  fundamentals_source?: string;
+  technical_computed?: boolean;
+  factor_computed?: boolean;
+  composite_computed?: boolean;
+  preset_evaluated?: boolean;
+  preset_passed?: boolean;
+}
+
+interface ContributionBreakdown {
+  inputs?: {
+    technical: number;
+    fundamental: number;
+    sentiment: number;
+    ml_prediction: number;
+  };
+  weights?: {
+    technical: number;
+    fundamental: number;
+    sentiment: number;
+    ml_prediction: number;
+  };
+  weighted_contributions?: {
+    technical: number;
+    fundamental: number;
+    sentiment: number;
+    ml_prediction: number;
+  };
+  overall?: number;
+  overall_adaptive_preview?: number;
+  adaptive_weighting_enabled?: boolean;
+  explainers?: string[];
+}
+
+interface ForecastScenario {
+  id: 'bear' | 'base' | 'bull' | 'stretch';
+  label: string;
+  probability: number;
+  expected_return: number;
+  mean_reversion_risk?: boolean;
+}
+
+interface ForecastPayload {
+  model: string;
+  horizon_days: number;
+  sample_size: number;
+  distribution?: {
+    mean_return?: number;
+    std_return?: number;
+    q20?: number;
+    q50?: number;
+    q80?: number;
+  };
+  regime?: {
+    current?: string;
+    p_up_next?: number;
+    p_down_next?: number;
+  };
+  scenarios?: ForecastScenario[];
 }
 
 interface ScanResult {
@@ -44,6 +109,10 @@ interface ScanResult {
   effective_signals: number;
   confidence: string;
   passed_presets: string[];
+  pipeline_steps?: PipelineSteps;
+  sparkline?: number[];
+  forecast?: ForecastPayload;
+  contribution_breakdown?: ContributionBreakdown;
   diagnostics?: ScanDiagnostics;
 }
 
@@ -51,18 +120,34 @@ interface ScanResponse {
   count: number;
   market: string;
   preset: string | null;
+  meta?: {
+    source?: string;
+    cache_schema?: string;
+  };
   results: ScanResult[];
 }
 
 const SCAN_TIMEOUT = 10 * 60 * 1000;
 const SCAN_STORAGE_KEY = 'equityoracle:last-scan-results';
+const SCAN_STORAGE_VERSION = 3;
 
 function loadSavedScan(): ScanResponse | null {
   try {
     const raw = localStorage.getItem(SCAN_STORAGE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as ScanResponse;
+    const parsed = JSON.parse(raw) as
+      | { version: number; data: ScanResponse }
+      | ScanResponse;
+
+    if ('version' in parsed && 'data' in parsed) {
+      if (parsed.version !== SCAN_STORAGE_VERSION) return null;
+      if (!parsed.data || !Array.isArray(parsed.data.results)) return null;
+      return parsed.data;
+    }
+
+    // Discard legacy payloads that do not include diagnostics.
     if (!parsed || !Array.isArray(parsed.results)) return null;
+    if (!parsed.results[0]?.diagnostics) return null;
     return parsed;
   } catch {
     return null;
@@ -171,11 +256,296 @@ function SignalBar({ label, value }: { label: string; value: number | null | und
   );
 }
 
+function Sparkline({ data, className }: { data?: number[]; className?: string }) {
+  if (!data || data.length < 2) {
+    return <div className={`h-8 rounded bg-gray-900/40 ${className ?? ''}`} />;
+  }
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+  const points = data
+    .map((v, i) => {
+      const x = (i / (data.length - 1)) * 100;
+      const y = 100 - ((v - min) / range) * 100;
+      return `${x},${y}`;
+    })
+    .join(' ');
+  const first = data[0] ?? 0;
+  const last = data[data.length - 1] ?? first;
+  const positive = last >= first;
+  return (
+    <svg viewBox="0 0 100 100" preserveAspectRatio="none" className={className ?? 'h-8 w-full'}>
+      <polyline
+        fill="none"
+        stroke={positive ? '#22c55e' : '#f59e0b'}
+        strokeWidth="3"
+        points={points}
+        vectorEffect="non-scaling-stroke"
+      />
+    </svg>
+  );
+}
+
+function FutureProjectionFlow({ result }: { result: ScanResult }) {
+  const [hoveredPath, setHoveredPath] = useState<string | null>(null);
+  const history = (result.sparkline && result.sparkline.length >= 4 ? result.sparkline : []).slice(-12);
+  const historyFirst = history[0] ?? 100;
+  const historyLast = history[history.length - 1] ?? historyFirst;
+  const forecast = result.forecast;
+  const scenarios = forecast?.scenarios ?? [];
+  const toPct = (v: number | undefined) => (v == null || Number.isNaN(v) ? '—' : `${(v * 100).toFixed(1)}%`);
+  const quantiles = forecast?.distribution;
+
+  const scenarioStyles: Record<string, { color: string; meaning: string; how: string }> = {
+    bear: {
+      color: '#ef4444',
+      meaning: 'Downside regime dominates over horizon.',
+      how: 'Estimated from historical forward-return tails and regime transition state.',
+    },
+    base: {
+      color: '#eab308',
+      meaning: 'Balanced path around central tendency.',
+      how: 'Driven by median historical outcomes adjusted by current regime probability.',
+    },
+    bull: {
+      color: '#22c55e',
+      meaning: 'Positive continuation with supportive trend state.',
+      how: 'Reflects upper-mid return cluster when trend/factor context stays constructive.',
+    },
+    stretch: {
+      color: '#10b981',
+      meaning: 'Low-frequency upside extension.',
+      how: 'Represents tail upside scenarios from empirical return history.',
+    },
+  };
+  const defaultScenarioStyle = scenarioStyles.base ?? {
+    color: '#eab308',
+    meaning: 'Balanced path around central tendency.',
+    how: 'Driven by median historical outcomes adjusted by current regime probability.',
+  };
+
+  const scenarioPaths = scenarios.map((scenario) => {
+    const terminal = historyLast * (1 + scenario.expected_return);
+    const points: number[] = [];
+    for (let i = 1; i <= 8; i += 1) {
+      const ratio = i / 8;
+      points.push(historyLast + (terminal - historyLast) * ratio);
+    }
+    const style = scenarioStyles[scenario.id] ?? defaultScenarioStyle;
+    return { ...scenario, points, color: style.color, meaning: style.meaning, how: style.how };
+  });
+
+  const q20Terminal = quantiles?.q20 != null ? historyLast * (1 + quantiles.q20) : null;
+  const q50Terminal = quantiles?.q50 != null ? historyLast * (1 + quantiles.q50) : null;
+  const q80Terminal = quantiles?.q80 != null ? historyLast * (1 + quantiles.q80) : null;
+
+  const quantileTrails = [q20Terminal, q50Terminal, q80Terminal]
+    .map((q) => {
+      if (q == null) return null;
+      const points: number[] = [];
+      for (let i = 1; i <= 8; i += 1) {
+        const ratio = i / 8;
+        points.push(historyLast + (q - historyLast) * ratio);
+      }
+      return points;
+    })
+    .filter((trail): trail is number[] => Boolean(trail));
+
+  const allValues = [...history, ...scenarioPaths.flatMap((s) => s.points), ...quantileTrails.flat()];
+  const min = allValues.length ? Math.min(...allValues) : historyLast - 1;
+  const max = allValues.length ? Math.max(...allValues) : historyLast + 1;
+  const range = max - min || 1;
+  const mapY = (value: number) => 132 - ((value - min) / range) * 104;
+
+  const historyPoints = history
+    .map((value, idx) => {
+      const x = (idx / Math.max(history.length - 1, 1)) * 42 + 6;
+      return `${x},${mapY(value).toFixed(2)}`;
+    })
+    .join(' ');
+
+  const hovered = scenarioPaths.find((s) => s.id === hoveredPath) ?? null;
+
+  return (
+    <div className="rounded-lg border border-gray-800 bg-gray-950/30 p-3 space-y-3">
+      <p className="text-xs font-semibold text-gray-300 uppercase tracking-wide">Future Direction Flow</p>
+      <svg viewBox="0 0 100 140" className="w-full h-40 rounded-md bg-gray-950/70 border border-gray-800/70">
+        <line x1="48" y1="12" x2="48" y2="134" stroke="#374151" strokeDasharray="2 2" />
+        {history.length > 1 && (
+          <polyline
+            points={historyPoints}
+            fill="none"
+            stroke="#38bdf8"
+            strokeWidth="1.8"
+            vectorEffect="non-scaling-stroke"
+            strokeLinecap="round"
+          />
+        )}
+        {quantileTrails.map((trail, idx) => {
+          const label = idx === 0 ? 'Q20' : idx === 1 ? 'Q50' : 'Q80';
+          const points = trail
+            .map((value, i) => `${48 + ((i + 1) / trail.length) * 45},${mapY(value).toFixed(2)}`)
+            .join(' ');
+          return (
+            <polyline
+              key={label}
+              points={`48,${mapY(historyLast).toFixed(2)} ${points}`}
+              fill="none"
+              stroke="#94a3b8"
+              strokeWidth="1.1"
+              strokeDasharray={idx === 1 ? '4 2' : '2 2'}
+              strokeOpacity="0.55"
+              vectorEffect="non-scaling-stroke"
+            >
+              <title>{`${label} projected quantile`}</title>
+            </polyline>
+          );
+        })}
+        {scenarioPaths.map((scenario) => {
+          const points = scenario.points
+            .map((value, idx) => {
+              const x = 48 + ((idx + 1) / scenario.points.length) * 45;
+              return `${x},${mapY(value).toFixed(2)}`;
+            })
+            .join(' ');
+          const endX = 93;
+          const endY = mapY(scenario.points[scenario.points.length - 1] ?? historyLast);
+          return (
+            <g key={scenario.id}>
+              <polyline
+                points={`48,${mapY(historyLast).toFixed(2)} ${points}`}
+                fill="none"
+                stroke={scenario.color}
+                strokeWidth={hoveredPath === scenario.id ? '2.6' : '1.7'}
+                strokeOpacity={hoveredPath && hoveredPath !== scenario.id ? '0.35' : '0.95'}
+                vectorEffect="non-scaling-stroke"
+                strokeLinecap="round"
+                onMouseEnter={() => setHoveredPath(scenario.id)}
+                onMouseLeave={() => setHoveredPath(null)}
+              >
+                <title>{`${scenario.label}: ${scenario.meaning}`}</title>
+              </polyline>
+              <circle
+                cx={endX}
+                cy={endY}
+                r={hoveredPath === scenario.id ? '1.9' : '1.5'}
+                fill={scenario.color}
+                onMouseEnter={() => setHoveredPath(scenario.id)}
+                onMouseLeave={() => setHoveredPath(null)}
+              >
+                <title>{`${scenario.label} endpoint`}</title>
+              </circle>
+            </g>
+          );
+        })}
+      </svg>
+      <div className="flex flex-wrap items-center gap-2">
+        {scenarioPaths.map((scenario) => (
+          <button
+            key={scenario.id}
+            type="button"
+            className={`px-2 py-1 rounded border text-[11px] transition-colors ${
+              hoveredPath === scenario.id
+                ? 'border-brand-500/60 bg-brand-500/10 text-brand-200'
+                : 'border-gray-700 bg-gray-900/60 text-gray-400 hover:border-gray-600'
+            }`}
+            style={{ boxShadow: hoveredPath === scenario.id ? `inset 0 0 0 1px ${scenario.color}55` : undefined }}
+            onMouseEnter={() => setHoveredPath(scenario.id)}
+            onMouseLeave={() => setHoveredPath(null)}
+            title={`${scenario.label}: ${scenario.meaning}`}
+          >
+            <span className="inline-block w-2 h-2 rounded-full mr-1.5 align-middle" style={{ backgroundColor: scenario.color }} />
+            <span className="align-middle">{scenario.label} {toPct(scenario.probability)}</span>
+          </button>
+        ))}
+      </div>
+      <div className="rounded border border-gray-800/80 bg-gray-950/60 px-2 py-2 text-[11px] text-gray-400 min-h-[3.25rem]">
+        {!forecast || !scenarioPaths.length ? (
+          <p>Forecast unavailable for this ticker (insufficient historical sample).</p>
+        ) : !hovered ? (
+          <p>
+            Hover a projected line to inspect probability and rationale. Model: {forecast.model}, sample size {forecast.sample_size}.
+          </p>
+        ) : (
+          <>
+            <p className="text-gray-200">{hovered.label}</p>
+            <p className="mt-0.5">
+              Probability {toPct(hovered.probability)} · Expected return {toPct(hovered.expected_return)}
+            </p>
+            <p className="mt-0.5">{hovered.meaning}</p>
+            <p className="mt-0.5 text-gray-500">{hovered.how}</p>
+            <p className="mt-0.5 text-gray-500">
+              Regime: {forecast.regime?.current ?? 'n/a'} · P(up next) {toPct(forecast.regime?.p_up_next)}
+            </p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function MetricTile({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg border border-gray-800 bg-gray-950/40 px-3 py-2">
       <p className="text-[10px] uppercase tracking-wide text-gray-500">{label}</p>
       <p className="mt-1 text-sm font-mono text-gray-200">{value}</p>
+    </div>
+  );
+}
+
+function ForecastCell({ forecast }: { forecast?: ForecastPayload }) {
+  if (!forecast?.scenarios?.length) {
+    return <span className="text-xs text-gray-600">N/A</span>;
+  }
+  const top = [...forecast.scenarios].sort((a, b) => b.probability - a.probability)[0];
+  if (!top) return <span className="text-xs text-gray-600">N/A</span>;
+
+  const detail = forecast.scenarios
+    .map((s) => `${s.label}: ${(s.probability * 100).toFixed(1)}% (${(s.expected_return * 100).toFixed(1)}%)`)
+    .join(' | ');
+  const quant = forecast.distribution;
+  const meta = `Q20 ${quant?.q20 != null ? (quant.q20 * 100).toFixed(1) : '—'}% · Q50 ${
+    quant?.q50 != null ? (quant.q50 * 100).toFixed(1) : '—'
+  }% · Q80 ${quant?.q80 != null ? (quant.q80 * 100).toFixed(1) : '—'}% · n=${forecast.sample_size}`;
+
+  return (
+    <div className="inline-flex items-center gap-1.5" title={`${detail}\n${meta}`}>
+      <span className="text-xs text-gray-200">{top.label.replace(' path', '')}</span>
+      <span className="text-[11px] font-mono text-brand-300">{(top.probability * 100).toFixed(1)}%</span>
+      <span className={`text-[11px] font-mono ${top.expected_return >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+        {(top.expected_return * 100).toFixed(1)}%
+      </span>
+    </div>
+  );
+}
+
+function FlowNode({
+  icon,
+  value,
+  subvalue,
+  tooltip,
+  tone = 'neutral',
+}: {
+  icon: string;
+  value: string;
+  subvalue?: string;
+  tooltip: string;
+  tone?: 'neutral' | 'good' | 'warn';
+}) {
+  const toneClass =
+    tone === 'good'
+      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+      : tone === 'warn'
+        ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+        : 'border-gray-700 bg-gray-900/60 text-gray-300';
+  return (
+    <div
+      title={tooltip}
+      className={`rounded-lg border px-2 py-2 min-w-[6rem] text-center transition-colors hover:border-brand-500/60 ${toneClass}`}
+    >
+      <p className="text-[14px] leading-none">{icon}</p>
+      <p className="mt-1 text-sm font-mono font-semibold">{value}</p>
+      {subvalue && <p className="text-[10px] text-gray-500 mt-0.5">{subvalue}</p>}
     </div>
   );
 }
@@ -190,6 +560,7 @@ function SkeletonRows() {
           <td className="p-3"><div className="h-3 w-16 bg-gray-800 rounded ml-auto" /></td>
           <td className="p-3"><div className="h-3 w-16 bg-gray-800 rounded ml-auto" /></td>
           <td className="p-3"><div className="h-3 w-16 bg-gray-800 rounded ml-auto" /></td>
+          <td className="p-3"><div className="h-3 w-20 bg-gray-800 rounded ml-auto" /></td>
           <td className="p-3"><div className="h-3 w-8 bg-gray-800 rounded ml-auto" /></td>
           <td className="p-3 flex justify-center"><div className="h-4 w-12 bg-gray-800 rounded" /></td>
         </tr>
@@ -211,7 +582,9 @@ function ScanResultsTable({ data, isFetching }: { data?: ScanResponse; isFetchin
           <td className="p-3 text-right"><ScorePill score={r.overall_score} /></td>
           <td className="p-3 text-right font-mono text-xs text-gray-300">{safeFixed(r.technical_score)}</td>
           <td className="p-3 text-right font-mono text-xs text-gray-300">{safeFixed(r.fundamental_score)}</td>
+          <td className="p-3 text-right"><ForecastCell forecast={r.forecast} /></td>
           <td className="p-3 text-right font-mono text-xs text-gray-400">{safeFixed(r.effective_signals, 0)}</td>
+          <td className="p-3 w-28"><Sparkline data={r.sparkline} className="h-7 w-full" /></td>
           <td className="p-3 text-center">
             <span className={`inline-flex px-2 py-0.5 rounded border text-[10px] font-bold uppercase ${confidenceClass(r.confidence)}`}>
               {r.confidence || '—'}
@@ -257,7 +630,13 @@ export default function ScannerPage() {
     if (!data) return;
     setSavedData(data);
     try {
-      localStorage.setItem(SCAN_STORAGE_KEY, JSON.stringify(data));
+      localStorage.setItem(
+        SCAN_STORAGE_KEY,
+        JSON.stringify({
+          version: SCAN_STORAGE_VERSION,
+          data,
+        }),
+      );
     } catch {
       // Ignore storage failures.
     }
@@ -298,7 +677,7 @@ export default function ScannerPage() {
   const lastUpdated = dataUpdatedAt ? new Date(dataUpdatedAt).toLocaleTimeString() : null;
 
   return (
-    <div className="space-y-6 max-w-7xl">
+    <div className={`space-y-6 ${immersiveMode ? 'max-w-none' : 'max-w-7xl'}`}>
       <div>
         <h2 className="text-2xl font-bold text-gray-100">Scanner</h2>
         <p className="text-sm text-gray-500 mt-1">
@@ -342,6 +721,17 @@ export default function ScannerPage() {
         </button>
         {lastUpdated && !isFetching && (
           <span className="text-xs text-gray-600">Last updated {lastUpdated}</span>
+        )}
+        {effectiveData?.meta?.source && !isFetching && (
+          <span
+            className={`text-[11px] px-2 py-1 rounded border ${
+              effectiveData.meta.source === 'cache'
+                ? 'border-amber-500/30 text-amber-300 bg-amber-500/10'
+                : 'border-emerald-500/30 text-emerald-300 bg-emerald-500/10'
+            }`}
+          >
+            {effectiveData.meta.source === 'cache' ? 'Served from cache' : 'Fresh scan'}
+          </span>
         )}
       </div>
 
@@ -393,7 +783,9 @@ export default function ScannerPage() {
                     <th className="text-right p-3 text-gray-500 text-xs font-medium uppercase">Overall</th>
                     <th className="text-right p-3 text-gray-500 text-xs font-medium uppercase">Technical</th>
                     <th className="text-right p-3 text-gray-500 text-xs font-medium uppercase">Fundamental</th>
+                    <th className="text-right p-3 text-gray-500 text-xs font-medium uppercase">Forecast</th>
                     <th className="text-right p-3 text-gray-500 text-xs font-medium uppercase">Signals</th>
+                    <th className="text-left p-3 text-gray-500 text-xs font-medium uppercase">Trend</th>
                     <th className="text-center p-3 text-gray-500 text-xs font-medium uppercase">Confidence</th>
                   </tr>
                 </thead>
@@ -412,13 +804,13 @@ export default function ScannerPage() {
         )}
 
         {(effectiveData || (isFetching && shouldScan)) && immersiveMode && (
-          <div className="grid grid-cols-1 xl:grid-cols-[1.2fr_0.8fr] gap-4">
-            <div className="bg-gray-900/60 border border-gray-800 rounded-xl overflow-hidden">
+          <div className="grid grid-cols-1 xl:grid-cols-[1.25fr_0.75fr] gap-4 min-h-[34rem] xl:h-[calc(100vh-14rem)]">
+            <div className="bg-gray-900/60 border border-gray-800 rounded-xl overflow-hidden flex flex-col min-h-0">
               <div className="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-gray-200">Immersive Signal Feed</h3>
                 <p className="text-[11px] text-gray-500">{effectiveData?.count ?? 0} stocks</p>
               </div>
-              <div className="max-h-[70vh] overflow-y-auto p-3 space-y-2">
+              <div className="flex-1 min-h-0 overflow-y-auto p-3 space-y-2">
                 {effectiveData?.results.map((r) => {
                   const active = r.ticker === selectedTicker;
                   return (
@@ -445,18 +837,21 @@ export default function ScannerPage() {
                         <SignalBar label="Technical" value={r.technical_score} />
                         <SignalBar label="Fundamental" value={r.fundamental_score} />
                       </div>
+                      <div className="mt-2 rounded bg-gray-900/40 p-1">
+                        <Sparkline data={r.sparkline} className="h-7 w-full" />
+                      </div>
                     </button>
                   );
                 })}
               </div>
             </div>
 
-            <div className="bg-gray-900/60 border border-gray-800 rounded-xl p-4 h-fit xl:sticky xl:top-4">
+            <div className="bg-gray-900/60 border border-gray-800 rounded-xl p-4 flex flex-col min-h-0 overflow-hidden">
               <h3 className="text-sm font-semibold text-gray-200">Signal Architecture</h3>
               {!selectedResult ? (
                 <p className="text-sm text-gray-500 mt-3">Select a stock for deep diagnostics.</p>
               ) : (
-                <div className="mt-3 space-y-4">
+                <div className="mt-3 space-y-4 flex-1 min-h-0 overflow-y-auto pr-1">
                   <div className="flex items-center justify-between">
                     <div>
                       <p className="text-lg font-bold text-gray-100">{selectedResult.ticker}</p>
@@ -470,9 +865,57 @@ export default function ScannerPage() {
                   <div className="grid grid-cols-2 gap-2">
                     <MetricTile label="Overall" value={safeFixed(selectedResult.overall_score)} />
                     <MetricTile label="Effective Signals" value={safeFixed(selectedResult.effective_signals, 0)} />
-                    <MetricTile label="Technical Pillar" value={safeFixed(selectedResult.technical_score)} />
-                    <MetricTile label="Fundamental Pillar" value={safeFixed(selectedResult.fundamental_score)} />
                   </div>
+
+                  <div className="rounded-lg border border-gray-800 bg-gray-950/30 p-3 space-y-3">
+                    <p className="text-xs font-semibold text-gray-300 uppercase tracking-wide">Signal Flow (hover each node)</p>
+                    <div className="flex items-center gap-1 overflow-x-auto pb-1">
+                      <FlowNode
+                        icon="◎"
+                        value={selectedResult.pipeline_steps?.ohlcv_source || 'unknown'}
+                        subvalue="price source"
+                        tooltip="OHLCV data source used in this run."
+                        tone={selectedResult.pipeline_steps?.ohlcv_source === 'provider' ? 'warn' : 'good'}
+                      />
+                      <span className="text-gray-600 text-xs">→</span>
+                      <FlowNode
+                        icon="∿"
+                        value={safeFixed(selectedResult.technical_score)}
+                        subvalue="technical"
+                        tooltip="Technical pillar score derived from RSI, ADX, MACD, RS and volume context."
+                        tone="neutral"
+                      />
+                      <span className="text-gray-600 text-xs">→</span>
+                      <FlowNode
+                        icon="ƒ"
+                        value={safeFixed(selectedResult.fundamental_score)}
+                        subvalue="factor"
+                        tooltip="Fundamental/factor pillar score from momentum, quality and value models."
+                        tone="neutral"
+                      />
+                      <span className="text-gray-600 text-xs">→</span>
+                      <FlowNode
+                        icon="Σ"
+                        value={safeFixed(selectedResult.overall_score)}
+                        subvalue={selectedResult.confidence}
+                        tooltip="Final weighted composite score from all pillars and model assumptions."
+                        tone={selectedResult.confidence === 'high' ? 'good' : selectedResult.confidence === 'medium' ? 'warn' : 'neutral'}
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <MetricTile label="Tech weighted" value={safeFixed(selectedResult.contribution_breakdown?.weighted_contributions?.technical, 2)} />
+                      <MetricTile label="Fund weighted" value={safeFixed(selectedResult.contribution_breakdown?.weighted_contributions?.fundamental, 2)} />
+                      <MetricTile label="Sent weighted" value={safeFixed(selectedResult.contribution_breakdown?.weighted_contributions?.sentiment, 2)} />
+                      <MetricTile label="ML weighted" value={safeFixed(selectedResult.contribution_breakdown?.weighted_contributions?.ml_prediction, 2)} />
+                    </div>
+                    <div className="rounded border border-gray-800/80 bg-gray-950/60 px-2 py-2 text-[11px] text-gray-400" title="Why overall can be lower than visible technical/fundamental scores.">
+                      {(selectedResult.contribution_breakdown?.explainers || []).slice(0, 2).map((line) => (
+                        <p key={line}>• {line}</p>
+                      ))}
+                    </div>
+                  </div>
+
+                  <FutureProjectionFlow result={selectedResult} />
 
                   <div className="rounded-lg border border-gray-800 bg-gray-950/30 p-3 space-y-3">
                     <p className="text-xs font-semibold text-gray-300 uppercase tracking-wide">Technical Derivation</p>
@@ -496,6 +939,39 @@ export default function ScannerPage() {
                     <p className="text-xs text-gray-500">
                       Factor composite: {safeFixed(selectedResult.diagnostics?.factor?.composite)}
                     </p>
+                  </div>
+
+                  <div className="rounded-lg border border-gray-800 bg-gray-950/30 p-3 space-y-2">
+                    <p className="text-xs font-semibold text-gray-300 uppercase tracking-wide">Pipeline Pulse</p>
+                    <div className="flex items-center gap-2 overflow-x-auto pb-1">
+                      <FlowNode
+                        icon={selectedResult.pipeline_steps?.universe_selected ? '●' : '○'}
+                        value="Universe"
+                        tooltip="Universe selection stage."
+                        tone={selectedResult.pipeline_steps?.universe_selected ? 'good' : 'neutral'}
+                      />
+                      <span className="text-gray-600 text-xs">→</span>
+                      <FlowNode
+                        icon={selectedResult.pipeline_steps?.technical_computed ? '●' : '○'}
+                        value="Tech"
+                        tooltip="Technical indicators computed."
+                        tone={selectedResult.pipeline_steps?.technical_computed ? 'good' : 'neutral'}
+                      />
+                      <span className="text-gray-600 text-xs">→</span>
+                      <FlowNode
+                        icon={selectedResult.pipeline_steps?.factor_computed ? '●' : '○'}
+                        value="Factor"
+                        tooltip="Factor model computed (momentum/quality/value)."
+                        tone={selectedResult.pipeline_steps?.factor_computed ? 'good' : 'neutral'}
+                      />
+                      <span className="text-gray-600 text-xs">→</span>
+                      <FlowNode
+                        icon={selectedResult.pipeline_steps?.composite_computed ? '●' : '○'}
+                        value="Composite"
+                        tooltip="Final weighted composite generated."
+                        tone={selectedResult.pipeline_steps?.composite_computed ? 'good' : 'neutral'}
+                      />
+                    </div>
                   </div>
 
                   {selectedResult.diagnostics?.preset?.selected && (
